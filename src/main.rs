@@ -7,6 +7,7 @@ use std::io::{Error, ErrorKind};
 use std::time::Duration;
 use yahoo_finance_api as yahoo;
 use async_trait::async_trait;
+use xactor::*;
 
 #[derive(Clap)]
 #[clap(
@@ -191,23 +192,43 @@ async fn handle_symbol_data(
     Some(closes)
 }
 
-#[async_std::main]
-async fn main() -> std::io::Result<()> {
+#[message]
+struct SymbolsMsg {
+    symbol: Vec<&'static str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+}
+
+struct DownloadingProcessingPrintingActor;
+
+impl Actor for DownloadingProcessingPrintingActor {}
+
+#[async_trait::async_trait]
+impl Handler<SymbolsMsg> for DownloadingProcessingPrintingActor {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolsMsg) {
+        let queries: Vec<_> = msg.symbol
+            .iter()
+            .map(|&symbol| handle_symbol_data(&symbol, &msg.from, &msg.to))
+            .collect();
+        let _ = future::join_all(queries).await;
+    }
+}
+
+#[xactor::main]
+async fn main() -> Result<()> {
     let opts = Opts::parse();
     let from: DateTime<Utc> = opts.from.parse().expect("Couldn't parse 'from' date");
     let to = Utc::now();
 
     let mut interval = stream::interval(Duration::from_secs(30));
 
+    let mut addr = DownloadingProcessingPrintingActor.start().await?;
+
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
     let symbols: Vec<&str> = opts.symbols.split(',').collect();
     while let Some(_) = interval.next().await {
-        let queries: Vec<_> = symbols
-            .iter()
-            .map(|&symbol| handle_symbol_data(&symbol, &from, &to))
-            .collect();
-        let _ = future::join_all(queries).await;
+        addr.call(SymbolsMsg {symbol: symbols.clone(), from, to });
     }
     Ok(())
 }

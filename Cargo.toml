@@ -13,3 +13,4 @@ clap = "3.0.0-beta.2"
 async-std = { version = "1.9", features = ["unstable", "attributes"] }
 async-trait = "0.1"
 futures = "0.3"
+xactor = "0.7.11"
