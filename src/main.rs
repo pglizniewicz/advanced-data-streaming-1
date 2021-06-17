@@ -194,7 +194,7 @@ async fn handle_symbol_data(
 
 #[message]
 struct SymbolsMsg {
-    symbol: Vec<&'static str>,
+    symbol: String,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 }
@@ -206,7 +206,8 @@ impl Actor for DownloadingProcessingPrintingActor {}
 #[async_trait::async_trait]
 impl Handler<SymbolsMsg> for DownloadingProcessingPrintingActor {
     async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolsMsg) {
-        let queries: Vec<_> = msg.symbol
+        let symbols: Vec<&str> = msg.symbol.split(',').collect();
+        let queries: Vec<_> = symbols
             .iter()
             .map(|&symbol| handle_symbol_data(&symbol, &msg.from, &msg.to))
             .collect();
@@ -222,13 +223,12 @@ async fn main() -> Result<()> {
 
     let mut interval = stream::interval(Duration::from_secs(30));
 
-    let mut addr = DownloadingProcessingPrintingActor.start().await?;
+    let addr = DownloadingProcessingPrintingActor.start().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
-    let symbols: Vec<&str> = opts.symbols.split(',').collect();
     while let Some(_) = interval.next().await {
-        addr.call(SymbolsMsg {symbol: symbols.clone(), from, to });
+        addr.call(SymbolsMsg {symbol: opts.symbols.clone(), from, to }).await?;
     }
     Ok(())
 }
