@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
 
     let mut interval = stream::interval(Duration::from_secs(5));
 
-    DownloadingProcessingPrintingActor::start_default().await?;
+    let _addr =DownloadingProcessingPrintingActor::start_default().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
