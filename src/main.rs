@@ -206,7 +206,6 @@ struct DownloadingProcessingPrintingActor;
 #[async_trait::async_trait]
 impl Actor for DownloadingProcessingPrintingActor {
     async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()>  {
-        println!("subscribed");
         ctx.subscribe::<SymbolsMsg>().await;
         Ok(())
     }
@@ -215,7 +214,6 @@ impl Actor for DownloadingProcessingPrintingActor {
 #[async_trait::async_trait]
 impl Handler<SymbolsMsg> for DownloadingProcessingPrintingActor {
     async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolsMsg) {
-        println!("handling");
         let symbols: Vec<&str> = msg.symbol.split(',').collect();
         let queries: Vec<_> = symbols
             .iter()
@@ -232,13 +230,12 @@ async fn main() -> Result<()> {
 
     let mut interval = stream::interval(Duration::from_secs(5));
 
-    DownloadingProcessingPrintingActor::start_default().await?;
+    let start_default1 = DownloadingProcessingPrintingActor::start_default().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
     while let Some(_) = interval.next().await {
         let to = Utc::now();
-        println!("publishing");
         Broker::from_registry().await?.publish(SymbolsMsg {
             symbol: opts.symbols.clone(),
             from,
