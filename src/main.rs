@@ -8,6 +8,9 @@ use std::time::Duration;
 use yahoo_finance_api as yahoo;
 use async_trait::async_trait;
 use xactor::*;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 
 #[derive(Clap)]
 #[clap(
@@ -198,7 +201,7 @@ impl Handler<SymbolMsg> for DownloadingActor {
     }
 }
 
-// ProcessingAndPrintingActor
+// ProcessingActor
 
 #[message]
 #[derive(Clone)]
@@ -243,7 +246,7 @@ impl Handler<ClosesMsg> for ProcessingActor {
                 pct_change: pct_change * 100.0,
                 period_min,
                 period_max,
-                sma_last: *sma.last().unwrap_or(&0.0)
+                sma_last: *sma.last().unwrap_or(&0.0),
             }) {
                 eprintln!("no StatsMsg broker {}", e);
             }
@@ -251,7 +254,7 @@ impl Handler<ClosesMsg> for ProcessingActor {
     }
 }
 
-// PrintingActor
+// PrintingActor and WritingActor
 
 #[message]
 #[derive(Clone)]
@@ -293,6 +296,52 @@ impl Handler<StatsMsg> for PrintingActor {
     }
 }
 
+#[derive(Default)]
+struct WritingActor {
+    filename: String,
+    writer: Option<BufWriter<File>>,
+}
+
+#[async_trait::async_trait]
+impl Actor for WritingActor {
+    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
+        ctx.subscribe::<StatsMsg>().await;
+        let mut file = File::create(&self.filename)
+            .unwrap_or_else(|_| panic!("Could not open target file '{}'", self.filename));
+        self.writer = Some(BufWriter::new(file));
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<StatsMsg> for WritingActor {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: StatsMsg) {
+        // a simple way to output CSV data
+        if let Some(buf) = &mut self.writer {
+            writeln!(
+                buf,
+                "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
+                msg.beginning.to_rfc3339(),
+                msg.symbol,
+                msg.last_price,
+                msg.pct_change,
+                msg.period_min,
+                msg.period_max,
+                msg.sma_last
+            );
+            buf.flush();
+        }
+    }
+}
+
+impl WritingActor {
+    fn flush(self: Self) {
+        if let Some(mut buf) = self.writer {
+            buf.flush();
+        }
+    }
+}
+
 #[xactor::main]
 async fn main() -> Result<()> {
     let opts = Opts::parse();
@@ -304,6 +353,8 @@ async fn main() -> Result<()> {
     let _downloading_actor_addr = DownloadingActor::start_default().await?;
     let _processing_printing_actor_addr = ProcessingActor::start_default().await?;
     let _printing_actor_addr = PrintingActor::start_default().await?;
+
+    let _printing2_actor_addr = WritingActor { filename: "output.csv".to_string(), writer: None }.start().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
