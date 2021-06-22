@@ -11,9 +11,9 @@ use xactor::*;
 
 #[derive(Clap)]
 #[clap(
-    version = "1.0",
-    author = "Claus Matzinger",
-    about = "A Manning LiveProject: async Rust"
+version = "1.0",
+author = "Claus Matzinger",
+about = "A Manning LiveProject: async Rust"
 )]
 struct Opts {
     #[clap(short, long, default_value = "AAPL,MSFT,UBER,GOOG")]
@@ -155,46 +155,9 @@ async fn fetch_closing_data(
     }
 }
 
-///
-/// Convenience function that chains together the entire processing chain.
-///
-async fn handle_symbol_data(
-    symbol: &str,
-    beginning: &DateTime<Utc>,
-    end: &DateTime<Utc>,
-) -> Option<Vec<f64>> {
-    let closes = fetch_closing_data(symbol, beginning, end).await.ok()?;
-    if !closes.is_empty() {
-        let diff = PriceDifference {};
-        let min = MinPrice {};
-        let max = MaxPrice {};
-        let sma = WindowedSMA { window_size: 30 };
-
-        let period_max: f64 = max.calculate(&closes).await?;
-        let period_min: f64 = min.calculate(&closes).await?;
-
-        let last_price = *closes.last()?;
-        let (_, pct_change) = diff.calculate(&closes).await?;
-        let sma = sma.calculate(&closes).await?;
-
-        // a simple way to output CSV data
-        println!(
-            "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
-            beginning.to_rfc3339(),
-            symbol,
-            last_price,
-            pct_change * 100.0,
-            period_min,
-            period_max,
-            sma.last().unwrap_or(&0.0)
-        );
-    }
-    Some(closes)
-}
-
 #[message]
 #[derive(Clone)]
-struct SymbolsMsg {
+struct SymbolMsg {
     symbol: String,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -205,21 +168,50 @@ struct DownloadingProcessingPrintingActor;
 
 #[async_trait::async_trait]
 impl Actor for DownloadingProcessingPrintingActor {
-    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()>  {
-        ctx.subscribe::<SymbolsMsg>().await;
+    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
+        ctx.subscribe::<SymbolMsg>().await;
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl Handler<SymbolsMsg> for DownloadingProcessingPrintingActor {
-    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolsMsg) {
-        let symbols: Vec<&str> = msg.symbol.split(',').collect();
-        let queries: Vec<_> = symbols
-            .iter()
-            .map(|&symbol| handle_symbol_data(&symbol, &msg.from, &msg.to))
-            .collect();
-        let _ = future::join_all(queries).await;
+impl Handler<SymbolMsg> for DownloadingProcessingPrintingActor {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolMsg) {
+        let symbol = &msg.symbol;
+        let beginning = &msg.from;
+        let end = &msg.to;
+        match fetch_closing_data(symbol, beginning, end).await {
+            Ok(closes) => {
+                if !closes.is_empty() {
+                    let diff = PriceDifference {};
+                    let min = MinPrice {};
+                    let max = MaxPrice {};
+                    let sma = WindowedSMA { window_size: 30 };
+
+                    let period_max: f64 = max.calculate(&closes).await.unwrap_or(-1.0);
+                    let period_min: f64 = min.calculate(&closes).await.unwrap_or(-1.0);
+
+                    let last_price = *closes.last().unwrap_or(&-1.0);
+                    let (_, pct_change) = diff.calculate(&closes).await.unwrap_or((-1.0, -1.0));
+                    let sma = sma.calculate(&closes).await.unwrap_or(vec![]);
+
+                    // a simple way to output CSV data
+                    println!(
+                        "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
+                        beginning.to_rfc3339(),
+                        symbol,
+                        last_price,
+                        pct_change * 100.0,
+                        period_min,
+                        period_max,
+                        sma.last().unwrap_or(&0.0)
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("Error fetching '{}': {}", symbol, e);
+            }
+        }
     }
 }
 
@@ -227,20 +219,23 @@ impl Handler<SymbolsMsg> for DownloadingProcessingPrintingActor {
 async fn main() -> Result<()> {
     let opts = Opts::parse();
     let from: DateTime<Utc> = opts.from.parse().expect("Couldn't parse 'from' date");
+    let symbols: Vec<String> = opts.symbols.split(',').map(|s| s.to_string()).collect();
 
     let mut interval = stream::interval(Duration::from_secs(5));
 
-    let start_default1 = DownloadingProcessingPrintingActor::start_default().await?;
+    let _actor_addr = DownloadingProcessingPrintingActor::start_default().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
     while let Some(_) = interval.next().await {
         let to = Utc::now();
-        Broker::from_registry().await?.publish(SymbolsMsg {
-            symbol: opts.symbols.clone(),
-            from,
-            to
-        });
+        for symbol in &symbols {
+            Broker::from_registry().await?.publish(SymbolMsg {
+                symbol: symbol.clone(),
+                from,
+                to,
+            });
+        }
     }
     Ok(())
 }
@@ -248,6 +243,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+
     use super::*;
 
     #[async_std::test]
