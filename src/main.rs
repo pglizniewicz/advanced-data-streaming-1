@@ -209,10 +209,10 @@ struct ClosesMsg {
 }
 
 #[derive(Default)]
-struct ProcessingPrintingActor;
+struct ProcessingActor;
 
 #[async_trait::async_trait]
-impl Actor for ProcessingPrintingActor {
+impl Actor for ProcessingActor {
     async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
         ctx.subscribe::<ClosesMsg>().await;
         Ok(())
@@ -220,7 +220,7 @@ impl Actor for ProcessingPrintingActor {
 }
 
 #[async_trait::async_trait]
-impl Handler<ClosesMsg> for ProcessingPrintingActor {
+impl Handler<ClosesMsg> for ProcessingActor {
     async fn handle(&mut self, _ctx: &mut Context<Self>, msg: ClosesMsg) {
         let closes = msg.closes;
         if !closes.is_empty() {
@@ -236,21 +236,62 @@ impl Handler<ClosesMsg> for ProcessingPrintingActor {
             let (_, pct_change) = diff.calculate(&closes).await.unwrap_or((-1.0, -1.0));
             let sma = sma.calculate(&closes).await.unwrap_or(vec![]);
 
-            // a simple way to output CSV data
-            println!(
-                "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
-                msg.beginning.to_rfc3339(),
-                msg.symbol,
+            if let Err(e) = Broker::from_registry().await.unwrap().publish(StatsMsg {
+                symbol: msg.symbol,
+                beginning: msg.beginning,
                 last_price,
-                pct_change * 100.0,
+                pct_change: pct_change * 100.0,
                 period_min,
                 period_max,
-                sma.last().unwrap_or(&0.0)
-            );
+                sma_last: *sma.last().unwrap_or(&0.0)
+            }) {
+                eprintln!("no StatsMsg broker {}", e);
+            }
         }
     }
 }
 
+// PrintingActor
+
+#[message]
+#[derive(Clone)]
+struct StatsMsg {
+    pub symbol: String,
+    pub beginning: DateTime<Utc>,
+    pub last_price: f64,
+    pub pct_change: f64,
+    pub period_min: f64,
+    pub period_max: f64,
+    pub sma_last: f64,
+}
+
+#[derive(Default)]
+struct PrintingActor;
+
+#[async_trait::async_trait]
+impl Actor for PrintingActor {
+    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
+        ctx.subscribe::<StatsMsg>().await;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<StatsMsg> for PrintingActor {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: StatsMsg) {
+        // a simple way to output CSV data
+        println!(
+            "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
+            msg.beginning.to_rfc3339(),
+            msg.symbol,
+            msg.last_price,
+            msg.pct_change,
+            msg.period_min,
+            msg.period_max,
+            msg.sma_last
+        );
+    }
+}
 
 #[xactor::main]
 async fn main() -> Result<()> {
@@ -261,7 +302,8 @@ async fn main() -> Result<()> {
     let mut interval = stream::interval(Duration::from_secs(5));
 
     let _downloading_actor_addr = DownloadingActor::start_default().await?;
-    let _processing_printing_actor_addr = ProcessingPrintingActor::start_default().await?;
+    let _processing_printing_actor_addr = ProcessingActor::start_default().await?;
+    let _printing_actor_addr = PrintingActor::start_default().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
