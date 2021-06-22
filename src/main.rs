@@ -27,7 +27,6 @@ struct Opts {
 ///
 #[async_trait]
 trait StockSignal {
-
     ///
     /// The signal's data type.
     ///
@@ -155,6 +154,8 @@ async fn fetch_closing_data(
     }
 }
 
+// Downloading Actor
+
 #[message]
 #[derive(Clone)]
 struct SymbolMsg {
@@ -164,10 +165,10 @@ struct SymbolMsg {
 }
 
 #[derive(Default)]
-struct DownloadingProcessingPrintingActor;
+struct DownloadingActor;
 
 #[async_trait::async_trait]
-impl Actor for DownloadingProcessingPrintingActor {
+impl Actor for DownloadingActor {
     async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
         ctx.subscribe::<SymbolMsg>().await;
         Ok(())
@@ -175,37 +176,19 @@ impl Actor for DownloadingProcessingPrintingActor {
 }
 
 #[async_trait::async_trait]
-impl Handler<SymbolMsg> for DownloadingProcessingPrintingActor {
+impl Handler<SymbolMsg> for DownloadingActor {
     async fn handle(&mut self, _ctx: &mut Context<Self>, msg: SymbolMsg) {
         let symbol = &msg.symbol;
         let beginning = &msg.from;
         let end = &msg.to;
         match fetch_closing_data(symbol, beginning, end).await {
             Ok(closes) => {
-                if !closes.is_empty() {
-                    let diff = PriceDifference {};
-                    let min = MinPrice {};
-                    let max = MaxPrice {};
-                    let sma = WindowedSMA { window_size: 30 };
-
-                    let period_max: f64 = max.calculate(&closes).await.unwrap_or(-1.0);
-                    let period_min: f64 = min.calculate(&closes).await.unwrap_or(-1.0);
-
-                    let last_price = *closes.last().unwrap_or(&-1.0);
-                    let (_, pct_change) = diff.calculate(&closes).await.unwrap_or((-1.0, -1.0));
-                    let sma = sma.calculate(&closes).await.unwrap_or(vec![]);
-
-                    // a simple way to output CSV data
-                    println!(
-                        "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
-                        beginning.to_rfc3339(),
-                        symbol,
-                        last_price,
-                        pct_change * 100.0,
-                        period_min,
-                        period_max,
-                        sma.last().unwrap_or(&0.0)
-                    );
+                if let Err(e) = Broker::from_registry().await.unwrap().publish(ClosesMsg {
+                    symbol: symbol.clone(),
+                    beginning: msg.from,
+                    closes,
+                }) {
+                    eprintln!("no ClosesMsg broker {}", e);
                 }
             }
             Err(e) => {
@@ -215,6 +198,60 @@ impl Handler<SymbolMsg> for DownloadingProcessingPrintingActor {
     }
 }
 
+// ProcessingAndPrintingActor
+
+#[message]
+#[derive(Clone)]
+struct ClosesMsg {
+    symbol: String,
+    beginning: DateTime<Utc>,
+    closes: Vec<f64>,
+}
+
+#[derive(Default)]
+struct ProcessingPrintingActor;
+
+#[async_trait::async_trait]
+impl Actor for ProcessingPrintingActor {
+    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
+        ctx.subscribe::<ClosesMsg>().await;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<ClosesMsg> for ProcessingPrintingActor {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: ClosesMsg) {
+        let closes = msg.closes;
+        if !closes.is_empty() {
+            let diff = PriceDifference {};
+            let min = MinPrice {};
+            let max = MaxPrice {};
+            let sma = WindowedSMA { window_size: 30 };
+
+            let period_max: f64 = max.calculate(&closes).await.unwrap_or(-1.0);
+            let period_min: f64 = min.calculate(&closes).await.unwrap_or(-1.0);
+
+            let last_price = *closes.last().unwrap_or(&-1.0);
+            let (_, pct_change) = diff.calculate(&closes).await.unwrap_or((-1.0, -1.0));
+            let sma = sma.calculate(&closes).await.unwrap_or(vec![]);
+
+            // a simple way to output CSV data
+            println!(
+                "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
+                msg.beginning.to_rfc3339(),
+                msg.symbol,
+                last_price,
+                pct_change * 100.0,
+                period_min,
+                period_max,
+                sma.last().unwrap_or(&0.0)
+            );
+        }
+    }
+}
+
+
 #[xactor::main]
 async fn main() -> Result<()> {
     let opts = Opts::parse();
@@ -223,18 +260,21 @@ async fn main() -> Result<()> {
 
     let mut interval = stream::interval(Duration::from_secs(5));
 
-    let _actor_addr = DownloadingProcessingPrintingActor::start_default().await?;
+    let _downloading_actor_addr = DownloadingActor::start_default().await?;
+    let _processing_printing_actor_addr = ProcessingPrintingActor::start_default().await?;
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
     while let Some(_) = interval.next().await {
         let to = Utc::now();
         for symbol in &symbols {
-            Broker::from_registry().await?.publish(SymbolMsg {
+            if let Err(e) = Broker::from_registry().await.unwrap().publish(SymbolMsg {
                 symbol: symbol.clone(),
                 from,
                 to,
-            });
+            }) {
+                eprintln!("no SymbolMsg broker {}", e);
+            }
         }
     }
     Ok(())
